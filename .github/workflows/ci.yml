@@ -1,0 +1,189 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  SWIFT_STRICT_CONCURRENCY: targeted
+  TZ: America/Los_Angeles
+  LANG: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
+
+jobs:
+  validate:
+    name: Validate Resources
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate flag resources
+        run: |
+          python3 Scripts/validate_flags.py \
+            --resources Sources/CircleFlagsKit/Resources \
+            --require-fallback xx \
+            --strict-alpha2
+
+  test-macos:
+    name: macOS · swift test
+    runs-on: macos-15
+    needs: validate
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "==> Installed Xcodes:"
+          ls -1 /Applications | grep -E '^Xcode_.*\.app$' || true
+
+          XCODE_APP="$(ls -1 /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -n 1 || true)"
+          if [ -z "$XCODE_APP" ]; then
+            XCODE_APP="$(ls -1 /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -n 1 || true)"
+          fi
+          if [ -z "$XCODE_APP" ]; then
+            echo "ERROR: No Xcode_*.app found under /Applications"
+            exit 1
+          fi
+
+          XCODE_APP="${XCODE_APP%:}"
+          echo "==> Using Xcode: $XCODE_APP"
+          printf "DEVELOPER_DIR=%s\n" "$XCODE_APP/Contents/Developer" >> "$GITHUB_ENV"
+
+      - name: Toolchain sanity check
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "DEVELOPER_DIR=$DEVELOPER_DIR"
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Stabilize UI rendering defaults (best effort)
+        shell: bash
+        run: |
+          set -euo pipefail
+          defaults write NSGlobalDomain NSAutomaticWindowAnimationsEnabled -bool false || true
+          defaults write NSGlobalDomain NSScrollAnimationEnabled -bool false || true
+          defaults write NSGlobalDomain NSWindowResizeTime -float 0.001 || true
+          defaults write -g AppleLocale -string "en_US" || true
+          defaults write -g AppleLanguages -array "en" || true
+          defaults write -g AppleMeasurementUnits -string "Inches" || true
+          defaults write -g AppleMetricUnits -bool false || true
+
+      - name: Cache SwiftPM
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build
+            ~/Library/Caches/org.swift.swiftpm
+            ~/.swiftpm
+          key: ${{ runner.os }}-swiftpm-${{ hashFiles('Package.resolved', 'Package.swift') }}
+          restore-keys: |
+            ${{ runner.os }}-swiftpm-
+
+      - name: Run SwiftPM tests
+        env:
+          SWIFT_DETERMINISTIC_HASHING: "1"
+        run: |
+          set -euo pipefail
+
+
+          swift test -v \
+            --skip CircleFlagsKitTests.CircleFlagsKitSnapshotTests \
+            -Xswiftc -strict-concurrency=targeted
+
+      - name: Upload artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-failure-artifacts
+          path: |
+            **/*.xcresult
+            **/Tests/**/__Snapshots__/**/*.png
+          if-no-files-found: ignore
+
+  test-ios:
+    name: iOS Simulator · xcodebuild test
+    runs-on: macos-15
+    needs: validate
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode (prefer newest)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "==> Installed Xcodes:"
+          ls -1 /Applications | grep -E '^Xcode_.*\.app$' || true
+
+          XCODE_APP="$(ls -1 /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -n 1 || true)"
+          if [ -z "$XCODE_APP" ]; then
+            XCODE_APP="$(ls -1 /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -n 1 || true)"
+          fi
+          if [ -z "$XCODE_APP" ]; then
+            echo "ERROR: No Xcode_*.app found under /Applications"
+            exit 1
+          fi
+
+          XCODE_APP="${XCODE_APP%:}"
+          echo "==> Using Xcode: $XCODE_APP"
+          printf "DEVELOPER_DIR=%s\n" "$XCODE_APP/Contents/Developer" >> "$GITHUB_ENV"
+
+      - name: Toolchain sanity check
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "DEVELOPER_DIR=$DEVELOPER_DIR"
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Cache DerivedData
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Developer/Xcode/DerivedData
+          key: ${{ runner.os }}-deriveddata-${{ hashFiles('Package.resolved', 'Package.swift') }}
+          restore-keys: |
+            ${{ runner.os }}-deriveddata-
+
+      - name: Run iOS tests
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SCHEME="CircleFlagsKit"
+
+          echo "==> Show destinations:"
+          xcodebuild -scheme "$SCHEME" -showdestinations
+
+          xcodebuild test \
+            -scheme "$SCHEME" \
+            -destination "platform=iOS Simulator,name=iPhone 16 Pro Max,OS=26.1" \
+            -resultBundlePath TestResults-iOS.xcresult \
+            SWIFT_STRICT_CONCURRENCY=targeted \
+            | xcpretty
+
+      - name: Upload xcresult
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-xcresult
+          path: TestResults-iOS.xcresult
+          if-no-files-found: ignore
