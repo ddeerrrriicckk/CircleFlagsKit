@@ -45,7 +45,7 @@ File → Add Packages… → Enter repository URL
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/xxx/CircleFlagsKit.git", from: "1.0.0")
+    .package(url: "https://github.com/ddeerrrriicckk/CircleFlagsKit.git", from: "1.0.0")
 ]
 ```
 
@@ -321,7 +321,6 @@ This project uses **SnapshotTesting**.
 > This section is for **quick scanning**:
 >
 > * Users can immediately see what the library provides
-> * Adds a professional, production-ready feel to the repository
 
 ---
 
